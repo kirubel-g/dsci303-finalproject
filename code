@@ -1,0 +1,404 @@
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+import math
+import ast
+import re
+import string
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem.snowball import SnowballStemmer
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+from sklearn.metrics.pairwise import cosine_similarity
+
+# Load metadata and credits
+metadf = pd.read_csv('movies_metadata.csv', low_memory = False)
+castdf = pd.read_csv('credits.csv', low_memory = False)
+
+# Print the high-level information
+metadf = metadf.drop_duplicates(subset='id', keep="first")
+castdf = castdf.drop_duplicates(subset='id', keep="first")
+metadf.info()
+
+# Replace the columns with a bunch of NAs with 0
+metadf['belongs_to_collection'] = metadf['belongs_to_collection'].fillna(0)
+metadf['homepage'] = metadf['homepage'].fillna(0)
+metadf['tagline'] = metadf['tagline'].fillna('No tagline')
+
+castdf = castdf[['cast','crew','id']]
+castdf
+
+# Combine dataframes
+castdf['id'] = castdf['id'].astype(str)
+metadf['id'] = metadf['id'].astype(str)
+metadf = metadf.merge(castdf,how='left', left_on='id', right_on='id')
+
+# Drop certain columns (features) we don't need
+metadf = metadf[metadf.adult != 'True']
+metadf = metadf.drop(columns=['adult', 'homepage', 'original_title', 'popularity', 'spoken_languages', 'status', 'video', 'vote_count'])
+
+# Drop all remaining NAs
+metadf = metadf.dropna() 
+
+metadf['budget'] = metadf.loc[:,('budget')].astype(float)
+metadf['id'] = metadf.loc[:,('id')].astype(float)
+metadf['imdb_id'] = metadf.loc[:,('imdb_id')].astype(str)
+metadf['revenue'] = metadf.loc[:,('revenue')].astype(float)
+metadf['runtime'] = metadf.loc[:,('runtime')].astype(float)
+metadf['vote_average'] = metadf.loc[:,('vote_average')].astype(float)
+metadf.info()
+
+# Break up Genres to increase usability
+import ast
+def extract_genres(genres_str):
+    try:
+        genres_list = ast.literal_eval(genres_str)
+        primary_genre = genres_list[0]['name'] if len(genres_list) > 0 else None
+        secondary_genre = genres_list[1]['name'] if len(genres_list) > 1 else None
+        tertiary_genre = genres_list[2]['name'] if len(genres_list) > 2 else None
+        return primary_genre, secondary_genre, tertiary_genre
+    except (ValueError, SyntaxError):
+        return None, None, None
+
+# Applying the function to extract genres
+metadf[['primary_genre', 'secondary_genre', 'tertiary_genre']] = metadf['genres'].apply(
+    lambda x: pd.Series(extract_genres(x)))
+
+# Break up Cast to increase usability
+def extract_cast(cast_str):
+    try:
+        cast_list = ast.literal_eval(cast_str)
+        primary_actor = cast_list[0]['name'] if len(cast_list) > 0 else None
+        secondary_actor = cast_list[1]['name'] if len(cast_list) > 1 else None
+        tertiary_actor = cast_list[2]['name'] if len(cast_list) > 2 else None
+        return primary_actor, secondary_actor, tertiary_actor
+    except (ValueError, SyntaxError):
+        return None, None, None
+
+# Applying the function to extract cast
+metadf[['primary_actor', 'secondary_actor', 'tertiary_actor']] = metadf['cast'].apply(
+    lambda x: pd.Series(extract_cast(x)))
+
+# Break up Dates to increase usability
+metadf['release_date'] = pd.to_datetime(metadf['release_date'], errors='coerce')
+
+# Extracting 'year' and 'month' from 'release_date'
+metadf['release_year'] = metadf['release_date'].dt.year
+metadf['release_month'] = metadf['release_date'].dt.month
+
+# Production companies information
+def extract_production_companies(prod_comp_str):
+    try:
+        prod_comp_list = ast.literal_eval(prod_comp_str)
+        if not prod_comp_list or not isinstance(prod_comp_list, list):
+            return None, 0
+        primary_prod_comp = prod_comp_list[0]['name'] if len(prod_comp_list) > 0 else None
+        num_prod_companies = len(prod_comp_list)
+        return primary_prod_comp, num_prod_companies
+    except (ValueError, SyntaxError):
+        return None, 0
+
+# Applying the function to extract production companies information
+metadf[['primary_production_company', 'num_production_companies']] = metadf['production_companies'].apply(
+    lambda x: pd.Series(extract_production_companies(x)))
+
+#### EDA
+
+# Genre Plot
+plt.figure(figsize=(20, 6))
+sns.countplot(data=metadf, x='primary_genre', order=metadf['primary_genre'].value_counts().index, palette="viridis")
+plt.title('Number of Movies per Primary Genre')
+plt.xlabel('Primary Genre')
+plt.ylabel('Number of Movies')
+plt.show()
+
+# Actor Plot
+top_25 = (metadf['primary_actor'].value_counts()).iloc[:25]
+topd = dict(top_25)
+df_top25 = pd.DataFrame.from_dict(topd, orient = 'index', columns = ['Number of Movies'])
+df_top25['Actor/Actress'] = df_top25.index
+df_top25.plot.bar(x='Actor/Actress', y='Number of Movies')
+plt.xticks(rotation=75)
+plt.title('Top 25 Lead Actors/Actresses')
+plt.show()
+
+# Production Company Plot
+top_25 = (metadf['primary_production_company'].value_counts()).iloc[:25]
+topd = dict(top_25)
+df_top25 = pd.DataFrame.from_dict(topd, orient = 'index', columns = ['Number of Movies'])
+df_top25['Production Company'] = df_top25.index
+df_top25.plot.bar(x='Production Company', y='Number of Movies')
+plt.xticks(rotation=80)
+plt.title('Top 25 Primary Production Companies')
+plt.show()
+
+# Number of Movies Released Each Year Plot
+plt.figure(figsize=(24, 6))
+sns.countplot(data=metadf, x='release_year', palette="viridis")
+plt.title('Number of Movies Released Each Year')
+plt.xlabel('Release Year')
+plt.ylabel('Number of Movies')
+plt.xticks(rotation=90)
+plt.show()
+
+# Revenue Distribution
+print(metadf['revenue'].describe())
+plt.figure(figsize=(5, 3))
+sns.histplot(data=metadf, x="revenue", kde = True, alpha = 0.4)
+
+# Select the numerical features
+df_num = metadf.select_dtypes(include = 'number')
+#Plot the distribution of each numeric features
+df_num.hist()
+
+df_cate = metadf.select_dtypes(include = ['O'])
+print('There are {} non numerical features including:\n{}'.format(len(df_cate.columns), df_cate.columns.tolist()))
+
+df_corr = metadf.corr(numeric_only = True)
+plt.figure(figsize=(24, 24))
+sns.set(font_scale=1.4)
+sns.heatmap(df_corr, 
+            cmap='viridis', vmax=1.0, vmin=-1.0, linewidths=0.1,
+            annot=True, annot_kws={"size": 14}, square=True);
+
+# Get the correlation between features and Revenue
+df_corr1 = df_corr.iloc[2]
+golden_features_list = df_corr1[abs(df_corr1) > 0.5].sort_values(ascending=False)
+print("There is {} strongly correlated values with Revenue:\n{}".format(len(golden_features_list), golden_features_list))
+
+fig, ax = plt.subplots(round(len(golden_features_list) / 3), 1, figsize = (18, 12))
+
+sns.regplot(data = metadf, x = "revenue", y = "budget")
+
+#### Textual Pre-Processing
+
+# Drop all unnecessary features so we only have features we want
+metadf = metadf.drop(columns=['genres', 'id', 'imdb_id', 'production_companies', 'production_countries', 'tagline', 'release_date'])
+
+# Extract Director to increase usability
+def extract_crew(crew_str):
+    try:
+        crew_list = ast.literal_eval(crew_str)
+        director = crew_list[0]['name'] if len(crew_list) > 0 else None
+        return director
+    except (ValueError, SyntaxError):
+        return None
+
+# Applying the function to extract cast
+metadf['director'] = metadf['crew'].apply(
+    lambda x: pd.Series(extract_crew(x)))
+
+metadf = metadf.drop(columns=['vote_average', 'cast', 'crew'])
+# Clean up belongs to collection column for ease
+def extract_collection(collection_str):
+    try:
+        collection_list = ast.literal_eval(collection_str)
+        collection = collection_list['name'] if len(collection_list) > 0 else None
+        return collection
+    except (ValueError, SyntaxError):
+        return None
+
+# Applying the function to extract cast
+metadf['collection'] = metadf['belongs_to_collection'].apply(
+    lambda x: pd.Series(extract_collection(x)))
+
+# Drop belongs to collection column
+metadf = metadf.drop(columns=['belongs_to_collection'])
+
+# And ensure NAs are '0' so we can easily remove later
+metadf['collection'] = metadf['collection'].fillna('0')
+metadf['director'] = metadf['director'].fillna('0')
+metadf['primary_genre'] = metadf['primary_genre'].fillna('0')
+metadf['secondary_genre'] = metadf['secondary_genre'].fillna('0')
+metadf['tertiary_genre'] = metadf['tertiary_genre'].fillna('0')
+metadf['primary_production_company'] = metadf['primary_production_company'].fillna('0')
+metadf['primary_actor'] = metadf['primary_actor'].fillna('0')
+metadf['secondary_actor'] = metadf['secondary_actor'].fillna('0')
+metadf['tertiary_actor'] = metadf['tertiary_actor'].fillna('0')
+
+#Check remaining missing values if any 
+df_na = (metadf.isnull().sum() / len(metadf)) * 100
+df_na = df_na.drop(df_na[df_na == 0].index).sort_values(ascending=False)
+missing_data = pd.DataFrame({'Missing Ratio' :df_na})
+missing_data.head()
+
+# merging all text column to single text column to work with
+metadf['organized'] =  (metadf['original_language'] + ' ' + metadf['overview'] + ' ' + metadf['title'] + ' ' + metadf['primary_genre'] + 
+                        ' ' + metadf['secondary_genre'] + ' ' + metadf['tertiary_genre'] + ' ' + metadf['primary_actor'] + ' ' + metadf['secondary_actor'] + 
+                        ' ' + metadf['tertiary_actor'] + ' ' + metadf['primary_production_company'] + ' ' + metadf['director'] + ' ' + metadf['collection'])
+
+# clean up the text by removing any non-alphabetic characters
+
+def cleaner(x):
+    return re.sub(r"[^a-zA-Z ]","",str(x))
+
+metadf['organized'] = metadf['organized'].apply(cleaner)
+
+# Lower Case everything so we don't have differing values i.e. House vs house
+metadf['organized']= metadf['organized'].str.lower()
+# Drop more columns we don't need
+metadf = metadf.drop(columns=['release_month'])
+# Our datatset as is is too large to run with our computing power, so cut movies that don't have budget or revenue information available
+# Convert the 'budget' column to numeric, coercing errors to NaN
+metadf['budget'] = pd.to_numeric(metadf['budget'], errors='coerce')
+
+# Drop rows where the 'budget' is 0 or NaN
+metadf = metadf[(metadf['budget'] != 0) & ~metadf['budget'].isna()]
+
+# Remove all punctuation so we only have words left
+
+def remove_punc(text):
+    translator = str.maketrans('', '', string.punctuation)
+    text = text.translate(translator)
+    return text
+
+metadf['organized'] = metadf['organized'].apply(remove_punc)
+
+# Import libraries to assist with removing stopwords - i.e. a, the, etc.
+nltk.download('stopwords')
+nltk.download('punkt')
+
+# Remove Stopwords
+def ex_stopwords(text):
+    words = nltk.word_tokenize(text)
+    words = [word for word in words if word.lower() not in stopwords.words('english')]
+    # Join all words into one string
+    text = ' '.join(words)
+    return text
+
+metadf['organized'] = metadf['organized'].apply(ex_stopwords)
+
+# Introduce stemming for our similar words
+stemmer = SnowballStemmer('english')
+stop_words = set(stopwords.words('english'))
+
+def stemm(text):
+    words = nltk.word_tokenize(text)
+    stemmed = [stemmer.stem(word) for word in words]
+    return ' '.join(stemmed)
+
+# Create new dataframe column with our stemming applied
+metadf['organized_st'] = metadf['organized'].apply(stemm)
+
+# Create new dataframe with title and our cleaned organized column
+new_df = metadf[['title', 'organized_st']]
+
+# TF-IDF to assign scores for our words
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+t_vectorizer = TfidfVectorizer(max_features=15000)
+X = t_vectorizer.fit_transform(new_df['organized_st'])
+X.toarray()
+
+#### PCAs
+pca = PCA()
+pca.fit(X.toarray())
+pca_tuned = PCA(n_components = 0.95)
+pca_tuned.fit(X.toarray())
+X_transformed = pca_tuned.transform(X.toarray())
+X_transformed.shape
+
+from sklearn.cluster import KMeans
+sum_of_sq_dist = {} 
+for k in range(3,19):
+    km = KMeans(n_clusters= k, init= 'k-means++', max_iter= 300, n_init=10, random_state=0)
+    km = km.fit(X_transformed)
+    sum_of_sq_dist[k] = km.inertia_
+    
+#Plot for the sum of square distance values and clusters
+sns.pointplot(x = list(sum_of_sq_dist.keys()), y = list(sum_of_sq_dist.values()))
+plt.xlabel('Clusters')
+plt.ylabel('Sum of Square Distances')
+plt.title('Elbow Method For Optimal k')
+plt.show()
+
+plt.figure(figsize=(10,6), dpi=120)
+
+kmeans= KMeans(n_clusters=10, init= 'k-means++', random_state=9)
+kmeans.fit(X_transformed)
+
+#predicting the labels of clusters.
+label = kmeans.fit_predict(X_transformed)
+#Getting unique labels
+unique_labels = np.unique(label)
+ 
+#plotting the results:
+for i in unique_labels:
+    plt.scatter(X_transformed[label == i , 0] , X_transformed[label == i , 1] , label = i)
+plt.legend()
+plt.show()
+
+# Add cluster values to the dataframe
+metadf['cluster_number'] = kmeans.labels_
+
+#### Evaluation
+#removing stopwords
+tfidf = TfidfVectorizer(stop_words='english')
+
+#get the tf-idf scores
+#create TF-IDF matrix by fitting and transforming the data
+tfidf_matrix = tfidf.fit_transform(metadf['organized_st'])
+
+#shape of tfidf_matrix
+tfidf_matrix.shape
+
+from sklearn.metrics.pairwise import cosine_similarity
+cosine_sim = cosine_similarity(tfidf_matrix)
+
+programme_list=new_df['title'].to_list()
+
+def cosine_recommend(title, cosine_similarity=cosine_sim):
+    index = programme_list.index(title)         #finds the index of the input title in the programme_list.
+    sim_score = list(enumerate(cosine_sim[index])) #creates a list of tuples containing the similarity score and index between the input title and all other programmes in the dataset.
+    
+    #position 0 is the movie itself, thus exclude
+    sim_score = sorted(sim_score, key= lambda x: x[1], reverse=True)[1:11]  #sorts the list of tuples by similarity score in descending order.
+    recommend_index = [i[0] for i in sim_score]
+    rec_movie = new_df['title'].iloc[recommend_index]
+    rec_score = [round(i[1],4) for i in sim_score]
+    rec_table = pd.DataFrame(list(zip(rec_movie,rec_score)), columns=['Recommended movie','Similarity(0-1)'])
+    return rec_table
+
+def kmeans_recommend(title, kmeans_model, df):
+    
+    # Reset index to avoid indexing errors
+    df_reset = df.reset_index(drop=True)
+
+    # Get the index of our input movie
+    title_index = df_reset.index[df_reset['title'] == title].values[0]
+
+    # Get cluster number for input movie
+    cluster_num = kmeans_model.labels_[title_index]
+
+    # Get movies in the same cluster
+    cluster_movies = df_reset[df_reset['cluster_number'] == cluster_num]
+
+    # Use Euclidean distance to measure which movies are closest to input movie
+    input_movie = kmeans_model.transform(X_transformed)[title_index].reshape(1, -1)
+    cluster_movie = kmeans_model.transform(X_transformed)[cluster_movies.index]
+
+    # Calculate Euclidean distances
+    distances = np.linalg.norm(input_movie - cluster_movie, axis=1)
+
+    # Sort so that closer movies (near 0 distance) are considered more similar
+    sorted_distances = sorted(enumerate(distances), key=lambda x: x[1])
+
+    # Display top 10 recommended movies
+    # Sort 1:11 so we exclude the input movie from our recommendations
+    top10 = sorted_distances[1:11]
+    rec_movie_indices = [i[0] for i in top10]
+    rec_movie_titles = cluster_movies['title'].iloc[rec_movie_indices]
+    
+    # Round distances to 4th decimal place for visibility ease
+    rec_distances = [round(i[1], 4) for i in top10]
+
+    rec_table = pd.DataFrame(list(zip(rec_movie_titles, rec_distances)), columns=['Recommended Movie', 'Eucclidean Distance'])
+    return rec_table
+
+input_movie = 'Indiana Jones and the Last Crusade'
+kmeans_recommend(input_movie, kmeans, metadf)
+cosine_recommend(input_movie)
+
+
